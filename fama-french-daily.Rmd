@@ -1,0 +1,181 @@
+---
+title: "Fama French Daily"
+output: html_notebook
+---
+
+
+```{r setup, include = FALSE}
+ 
+library(tidyquant)
+library(tidyverse)
+library(timetk)
+library(broom)
+library(tibbletime)
+library(highcharter)
+library(scales)
+
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+```
+
+```{r}
+symbols <- c("SPY","EFA", "IJS", "EEM","AGG")
+  prices <- 
+    getSymbols(symbols, 
+               src = 'yahoo', 
+               from = "2008-01-01", 
+               auto.assign = TRUE, 
+               warnings = FALSE) %>% 
+  map(~Ad(get(.))) %>% 
+  reduce(merge) %>%
+  `colnames<-`(symbols)
+
+w <- c(0.25, 0.25, 0.20, 0.20, 0.10)
+
+portfolio_daily_returns <- 
+      prices %>% 
+      #to.monthly(indexAt = "firstof", OHLC = FALSE) %>% 
+      tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+      gather(asset, returns, -date) %>% 
+      group_by(asset) %>%  
+      mutate(returns = (log(returns) - log(lag(returns)))) %>% 
+      na.omit() %>%
+      tq_portfolio(assets_col  = asset, 
+               returns_col = returns,
+               weights     = w,
+               col_rename  = "returns",
+               rebalance_on = "years")
+
+head(portfolio_daily_returns)
+```
+
+Prep for shiny. Look at the code chunk below. Only variable need to change, `factors`.
+
+```{r}
+factors_input <- "Global_5_Factors_Daily"
+
+factors_address <- paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/", factors_input, "_CSV.zip", sep="" )
+
+factors_csv_name <- paste(factors_input, ".csv", sep="")
+
+temp <- tempfile()
+download.file(
+  # location of file to be downloaded
+  factors_address,
+  # where we want R to store that file
+  temp)
+
+Global_5_Factors <- 
+  read_csv(unz(temp, factors_csv_name), skip = 6 ) %>%
+  rename(date = X1, MKT = `Mkt-RF`) %>%
+  mutate(date = ymd(parse_date_time(date, "%Y%m%d"))) %>% 
+  #filter(date >= first(portfolio_returns_tq_rebalanced_monthly_first_day$date)) %>% 
+  #filter(date <= last(portfolio_returns_tq_rebalanced_monthly_first_day$date)) %>%
+  mutate_if(is.character,as.numeric)
+
+head(Global_5_Factors) 
+```
+
+
+```{r}
+ff_portfolio_returns_joined <-
+  portfolio_daily_returns %>% 
+  left_join(Global_5_Factors %>%  mutate_if(is.numeric, funs(. / 100))) %>% 
+  mutate(Returns_excess = returns - RF) %>%
+  select(-returns, -RF) %>% 
+  na.omit()
+
+
+```
+
+```{r}
+ff_portfolio_returns_joined %>%  
+  gather(factor, value, -date, -Returns_excess) %>% 
+  group_by(factor) %>% 
+  ggplot(aes(x = value, y = Returns_excess, color = factor)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") +
+  facet_wrap(~factor)
+```
+
+
+```{r}
+  
+ff_dplyr_byhand <-
+  ff_portfolio_returns_joined %>% 
+  do(model = lm(Returns_excess ~ . -date , data = .)) %>% 
+  tidy(model)
+
+ff_dplyr_byhand
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Rolling regressions are easy to implement
+lm_roll <- rollify(~lm(.x ~ .y), window = 5, unlist = FALSE)
+
+gapminder %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(rolling_lm = lm_roll(lifeExp, year))
+
+rolling_lm <- rollify(~lm(.x ~ .y - .x - .z, data = .y), window = 7, unlist = FALSE)
+zoo(ff_portfolio_returns_joined)
+require(zoo)
+rollapply(zoo(ff_portfolio_returns_joined),
+          width=10,
+          FUN = function(Z) 
+          { 
+             coef(lm(Returns_excess ~ MKT + SMB, data = as.data.frame(Z), na.rm=T))
+          },
+          by.column=FALSE, align="right")
+```
+
+```{r}
+rolling_lm <- rollify(.f = function(Returns_excess, MKT, SMB, HML, RMW, CMA) {
+                              lm(Returns_excess ~ MKT + SMB + HML + RMW + CMA)
+                           }, 
+                      window = 50, 
+                      unlist = FALSE)
+
+rolling_ff_test <-
+  ff_portfolio_returns_joined %>% 
+  mutate(rolling_lm = rolling_lm(Returns_excess, MKT, SMB, HML, RMW, CMA)) %>% 
+  #filter(!is.na(roll_lm)) %>%
+  mutate(tidied = map(rolling_lm, tidy)) %>% 
+  unnest(tidied) %>% 
+  select(date, term, estimate, std.error, statistic, p.value) %>% 
+  na.omit()
+
+rolling_ff_test
+
+```
+
+
+```{r}
+rolling_ff_test %>% 
+  group_by(term) %>% 
+  ggplot(aes(x = date, y = estimate, color = term)) + 
+  geom_line() +
+  facet_wrap(~term)
+```
+
+
+
+```{r}
+
+rolling_lm(ff_portfolio_returns_joined)
+ mutate(ff_portfolio_returns_joined, roll_lm = rolling_lm(ff_portfolio_returns_joined))
+ 
+ FB_reg %>%
+  filter(!is.na(roll_lm)) %>%
+  mutate(tidied = purrr::map(roll_lm, broom::tidy)) %>%
+  unnest(tidied) %>%
+  select(symbol, date, term, estimate, std.error, statistic, p.value)
+
+
+
+ff_portfolio_returns_joined$Returns_excess
+
+ff_dplyr_byhand
+```
+
+
+
