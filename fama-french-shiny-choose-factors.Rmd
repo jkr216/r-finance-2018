@@ -78,9 +78,9 @@ fluidRow(
 )
 
 fluidRow(
-  column(7,
+  column(6,
   dateInput("date", "Starting Date", min = "1990-01-01", "2013-01-01", format = "yyyy-mm-dd")),
-  column(4,
+  column(5,
   numericInput("window", "Window", 100, min = 50, max = 250, step = 20))
 )
 
@@ -132,11 +132,7 @@ factors_address <- paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french
 
 factors_csv_name <- paste(input$factor, ".csv", sep="")
 
-download.file(
-  # location of file to be downloaded
-  factors_address,
-  # where we want R to store that file
-  temp)
+download.file(factors_address, temp)
 
   
   FF_Factors <- 
@@ -169,21 +165,40 @@ rolling_lm <- rollify(.f = function(Returns_excess, MKT, SMB, HML, RMW, CMA) {
                            }, 
                       window = input$window, 
                       unlist = FALSE)
+
 rolling_ff <- 
   ff_portfolio_returns_joined() %>% 
-  mutate(rolling_lm = rolling_lm(Returns_excess, MKT, SMB, HML, RMW, CMA))
+  mutate(rolling_lm = rolling_lm(Returns_excess, MKT, SMB, HML, RMW, CMA)) %>% 
+  slice(-1:-input$window)
 
 })
+```
+
+```{r}
 
 rolling_r_squared_xts <- eventReactive(input$go, {
   rolling_ff() %>% 
-  slice(-1:-input$window) %>%
   mutate(glanced = map(rolling_lm, glance)) %>% 
   unnest(glanced) %>% 
   select(date, r.squared) %>% 
   tk_xts(date_var = date)
 })
 ```
+
+```{r}
+
+rolling_ff_tidy <- eventReactive(input$go, {
+  
+rolling_ff() %>%
+  mutate(tidied = map(rolling_lm, tidy)) %>% 
+  unnest(tidied) %>% 
+  select(date, term, estimate) %>% 
+  na.omit() %>%
+  group_by(term) %>%
+  filter(term != "(Intercept)")
+})  
+```
+
 
 Fama French
 =====================================
@@ -198,13 +213,15 @@ renderHighchart({
 
 highchart(type = "stock") %>% 
   hc_title(text = "Rolling R Squared") %>%
-  hc_add_series(rolling_r_squared_xts()) %>%
+  hc_add_series(rolling_r_squared_xts(), color = "cornflowerblue") %>%
   hc_add_theme(hc_theme_flat()) %>%
   hc_navigator(enabled = FALSE) %>% 
   hc_scrollbar(enabled = FALSE)
 })
 ```
 
+Row 2 {.tabset}
+------------------------------
 
 ### Model Results
 
@@ -214,40 +231,17 @@ renderTable({
 }, digits = 4)
 ```
 
-### Rolling Regression factor betas
+
+### Rolling Betas
 
 ```{r}
 renderPlot({
-  
-  rolling_ff() %>%
-  mutate(tidied = map(rolling_lm, tidy)) %>% 
-  unnest(tidied) %>% 
-  select(date, term, estimate, std.error, statistic, p.value) %>% 
-  na.omit() %>%
-  group_by(term) %>%
-  filter(term != "(Intercept)") %>% 
+  rolling_ff_tidy() %>%  
   ggplot(aes(x = date, y = estimate, color = term)) + 
-  geom_line() #+
-#  facet_wrap(~term)
+  geom_line()
 })
 ```
 
-
-Row 2
---------------------------------
-### scatter
-
-```{r}
-renderPlot({
-  ff_portfolio_returns_joined() %>%  
-  gather(factor, value, -date, -Returns_excess) %>% 
-  group_by(factor) %>% 
-  ggplot(aes(x = value, y = Returns_excess, color = factor)) + 
-  geom_point(position = "jitter", alpha = .1) + 
-  geom_smooth(method = "lm") +
-  facet_wrap(~factor)
-})
-```
 
 
 
