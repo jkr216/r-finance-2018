@@ -1,6 +1,7 @@
 ---
-title: "Fama French Daily"
-output: html_notebook
+title: "Shiny Fama French"
+output: 
+  html_notebook: default
 ---
 
 
@@ -17,47 +18,123 @@ library(scales)
 knitr::opts_chunk$set(message=FALSE, warning=FALSE)
 ```
 
+In this presentation, we will build a Shiny application that allows a user to construct a portfolio, choose a set of Fama French factors, regress the portfolio returns on the Fama French factors and visualize the results.
+
+The final app is viewable here: 
+
+www.reproduciblefinance.com/shiny/fama-french-choose-factors/
+
+The model and regression results are probably not new to the audience but we investigate some tools with broad applicability.
+
+First, the final app is a reproducible template for building a custom portfolio, running a multilinear regression and visualizing the results. It is purpose built for Fama French but can be generalized.
+
+Second, we will consider and work through the challenges of importing data from disparate sources(the Fama French home page CSVs and price data from yahoo! Finance), wrangling the disparate data such that it can be analysed together, and then running the analysis. That import and wrangling from different sources goes beyond the Fama French world.
+
+Lastly, we will present the model results in several formats: rolling R-squared over time using `highcharter`, a table of summary statistics tidied with the `broom` package, and individual factor rolling betas plotted with `ggplot`.  These can also be ported to different substantive models or projects.  
+
+Throughout this presentation, we will be toggling between building and testing code in an Rmarkdown Notebook and using that code in a live Shiny app. 
+
+Let's get to it.
+
+### Build Portfolio and Get Daily Returns
+
+We want to give the user the ability to build a custom portfolio. Let's go through the code flow for that task here before moving it our Shiny application.
+
+First, we choose ticker symbols and store them in a vector. We do that with `symbols <- c("SPY","EFA", "IJS", "EEM","AGG")`.  Those are the tickers for the 5 assets in our portfolio. We will allow the user to change these in the input sidebar of the Shiny app and build a custom portfolio.
+
+We will then pass `symbols` to yahoo! Finance via the `getSymbols()` function from the `quantmod` package. This will return an object with the opening price, closing price, adjusted price, daily high, daily low and daily volume. We don't want to work with all of those, though. The adjusted price is what we want. 
+
+To isolate the adjusted price, we use the `map()` function from the `purrr` package and apply `Ad(get(.))` to the imported prices. This will `get()` the adjusted price from each of our individual price series.  If we wanted the closing price, we would run `Cl(get(.))`.  That `.` refers to our initial object. Note that if you wish to choose different stock tickers, you change the tickers in the `symbols` vector.
+
+We could stop here and have the right substance - daily prices for 5 tickers - but the format wouldn't be great as we would have a list of 5 adjusted prices.  Since those prices are `xts` objects, we would have a list of 5 `xts` objects. This is because the `map()` function returns a list by default. 
+
+The `reduce(merge)` function will allow us to merge the 5 lists into one `xts` object.  The `merge()` function looks for the date index shared by our objects and uses that index.
+
+Finally, we want intuitive column names and use `colnames<-` to rename the columns according to the `symbols` object.  The `rename()` function from `dplyr` will not work here because the object structure is still `xts`. Note that since we pull the names from the `symbols` object, we can change this portfolio by changing the tickers in `symbols`.
+
 ```{r}
+# The symbols vector holds our tickers. 
 symbols <- c("SPY","EFA", "IJS", "EEM","AGG")
-  prices <- 
+
+
+prices <- 
     getSymbols(symbols, 
                src = 'yahoo', 
-               from = "2008-01-01", 
+               from = "2013-01-01", 
                auto.assign = TRUE, 
                warnings = FALSE) %>% 
   map(~Ad(get(.))) %>% 
   reduce(merge) %>%
   `colnames<-`(symbols)
-
-w <- c(0.25, 0.25, 0.20, 0.20, 0.10)
-
-portfolio_daily_returns <- 
-      prices %>% 
-      #to.monthly(indexAt = "firstof", OHLC = FALSE) %>% 
-      tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
-      gather(asset, returns, -date) %>% 
-      group_by(asset) %>%  
-      mutate(returns = (log(returns) - log(lag(returns)))) %>% 
-      na.omit() %>%
-      tq_portfolio(assets_col  = asset, 
-               returns_col = returns,
-               weights     = w,
-               col_rename  = "returns",
-               rebalance_on = "years")
-
-head(portfolio_daily_returns)
 ```
 
-Prep for shiny. Look at the code chunk below. Only variable need to change, `factors`.
+Next convert to returns with the `Return.calculate()` function from `Performance
+
+
+```{r}
+asset_returns_daily <- na.omit(Return.calculate(prices, method = "log")) 
+
+```
+
+Now create a weights vector. This is another input the user can change in the Shiny application.
+
+```{r}
+
+w <- c(0.25, 0.25, 0.20, 0.20, 0.10)
+```
+
+Finally, we use the `Return.portfolio()` function to calculate portfolio returns.
+
+```{r}
+
+portfolio_returns_daily <- 
+  Return.portfolio(asset_returns_daily, weights = w, rebalance_on = "years") %>%
+  `colnames<-`("returns")
+
+head(portfolio_returns_daily)
+```
+
+Importing daily prices and converting to portfolio returns is not a complex job, but it's still good practice to detail the steps for when our future self or a colleague wishes to revisit this work in 6 months and use it as a foundation for involved work. We can also see how this code flow gets ported almost directly over to our Shiny application.
+
+### Importing and Wrangling the Fama French Factors
+
+We need to get the Fama French factors data, which is not available on yahoo! Finance. Luckily Fama and French make their factor data available on their website.  We are going to document each step for importing and cleaning this data, to an extent that might be overkill. It can be a grind to document these steps now, but a time saver later when we need to update our Shiny app.  If someone else needs to update the model in the future, detailed data import steps are crucial.
+
+Have a look at the website where factor data is available.
+
+http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
+
+The data are packaged as zip files so we'll need to do a bit more than call `read_csv()`.  
+
+We will use the `tempfile()` function from base R to create a variable called `temp`, and will store the zipped file there.
+
+Now we invoke `downloadfile()`, pass it the URL address of the zip, which for daily Global 5 Factors  is "http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/Global_5_Factors_Daily_CSV.zip".
+
+However, I choose not to pass that URL in directly, instead I paste it together in pieces with
+
+`factors_input <- "Global_5_Factors_Daily"`
+
+`factors_address <- paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/", factors_input, "_CSV.zip", sep="" )`
+
+The reason for that is eventually we want to give the user the ability to choose different factors in the Shiny app, meaning the user is choosing a different URL end point depending on which zip is chosen.  
+
+We will enable that by having the user choose a different `factors_input` variable, that then gets pasted to the URL for download. We can toggle over to the Shiny app and see how this looks as a user input.
+
+Next we read the csv file using `read_csv()` but first we need to unzip that data with the `unz()` function. 
+
 
 ```{r}
 factors_input <- "Global_5_Factors_Daily"
 
-factors_address <- paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/", factors_input, "_CSV.zip", sep="" )
+factors_address <- 
+  paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/", 
+        factors_input, "_CSV.zip", 
+        sep="" )
 
 factors_csv_name <- paste(factors_input, ".csv", sep="")
 
 temp <- tempfile()
+
 download.file(
   # location of file to be downloaded
   factors_address,
@@ -65,117 +142,189 @@ download.file(
   temp)
 
 Global_5_Factors <- 
-  read_csv(unz(temp, factors_csv_name), skip = 6 ) %>%
-  rename(date = X1, MKT = `Mkt-RF`) %>%
-  mutate(date = ymd(parse_date_time(date, "%Y%m%d"))) %>% 
-  #filter(date >= first(portfolio_returns_tq_rebalanced_monthly_first_day$date)) %>% 
-  #filter(date <= last(portfolio_returns_tq_rebalanced_monthly_first_day$date)) %>%
-  mutate_if(is.character,as.numeric)
+  read_csv(unz(temp, factors_csv_name))
 
 head(Global_5_Factors) 
 ```
 
+Have a quick look and notice that the object is not at all what we were expecting. 
+
+We need to clean up the metadata by skipping a few rows with `skip = 6`. The general lesson here is each time we access data from a new source there can be all sorts of maintenance to be performed. And we need to document it!
+
+```{r}
+Global_5_Factors <- 
+  read_csv(unz(temp, factors_csv_name), skip = 6 ) 
+
+head(Global_5_Factors)
+```
+
+Notice the format of the `X1` column, which is the date. That doesn't look like it will play nicely with our date format for portfolio returns. We can change name of the column with `rename(date = X1)` and clean it up with `ymd(parse_date_time(date, "%Y%m%d"))` from the `lubridate` package.
+
+```{r}
+Global_5_Factors <- 
+  read_csv(unz(temp, factors_csv_name), skip = 6 ) %>%
+  rename(date = X1, MKT = `Mkt-RF`) %>%
+  mutate(date = ymd(parse_date_time(date, "%Y%m%d"))) 
+
+head(Global_5_Factors)
+```
+
+It looks good, but there's one problem. Fama French have their factors on a different scale from our monthly returns - their daily risk free rate is .03. We need to divide the FF factors by 100. Let's do that with `mutate_if(is.numeric, funs(. / 100))`.
+
+```{r}
+Global_5_Factors <- 
+  read_csv(unz(temp, factors_csv_name), skip = 6 ) %>%
+  rename(date = X1, MKT = `Mkt-RF`) %>%
+  mutate(date = ymd(parse_date_time(date, "%Y%m%d")))%>%
+  mutate_if(is.numeric, funs(. / 100))
+
+tail(Global_5_Factors)
+
+
+```
+
+Here we display the end of the Fama French observations and can see that they are not updated daily. That's a cost but it's not limited to publicly available sources. Internal data sources can have a lag in updates as well and we need to be aware of them. 
+
+In general, our Fama French data object looks good and we were perhaps a bit too painstaking about the path from zipped CSV to readable data frame object.  
+
+This particular path can be partly reused for other zipped filed but the more important idea is to document the data provenance that sits behind a Shiny application or any model that might be headed to production.  It is a grind in the beginning but a time saver in the future.  We can toggle over to the Shiny application and see how this is generalized to whatever Fama French series is chosen by the user.   
+
+### To the Analysis
+
+We now have two objects `portfolio_returns_daily` and `Global_5_Factors` and we want to regress a dependent variable from the former on several independent variables from the latter. 
+
+To do that, we can combine them into one object and use `mutate()` to run the model.  It's a two step process to combine them. First, let's coerce `portfolio_returns_daily` from an `xts` object to a tibble, then use `left_join()` to combine them based on the column they have in common, `date`.
+
+Not only will this create a new object for us, it acts as a check that the dates line up exactly because wherever they do not, we will see an NA.
 
 ```{r}
 ff_portfolio_returns_joined <-
-  portfolio_daily_returns %>% 
-  left_join(Global_5_Factors %>%  mutate_if(is.numeric, funs(. / 100))) %>% 
-  mutate(Returns_excess = returns - RF) %>%
-  select(-returns, -RF) %>% 
-  na.omit()
+  portfolio_returns_daily %>% 
+  tk_tbl(preserve_index = TRUE, rename_index = 'date') %>% 
+  left_join(Global_5_Factors)
 
-
+head(ff_portfolio_returns_joined)
+tail(ff_portfolio_returns_joined)
 ```
+
+Notice that the Fama French factors are not current up to today, so we have lots of NAs there. 
+
+One more bit of housekeeping is I want to add a column that is excess portfolio returns, above the risk free rate used by Fama French. Let's do that with `mutate(Returns_excess = returns - RF)`.
 
 ```{r}
-ff_portfolio_returns_joined %>%  
-  gather(factor, value, -date, -Returns_excess) %>% 
-  group_by(factor) %>% 
-  ggplot(aes(x = value, y = Returns_excess, color = factor)) + 
-  geom_point() + 
-  geom_smooth(method = "lm") +
-  facet_wrap(~factor)
+ff_portfolio_returns_joined <-
+  portfolio_returns_daily %>% 
+  tk_tbl(preserve_index = TRUE, rename_index = 'date') %>% 
+  left_join(Global_5_Factors) %>% 
+  mutate(Returns_excess = returns - RF) %>% 
+  na.omit()
+
+tail(ff_portfolio_returns_joined)
 ```
 
+As before, we will take this same flow and paste it into the Shiny application.
+
+We are finally ready for our substance, testing the Fama French factors. Nothing fancy here, we call `do(model = lm(Returns_excess ~ MKT + SMB + HML + RMW + CMA, data = .))` and clean up the results with `tidy(model)`.
 
 ```{r}
   
 ff_dplyr_byhand <-
   ff_portfolio_returns_joined %>% 
-  do(model = lm(Returns_excess ~ . -date , data = .)) %>% 
+  do(model = lm(Returns_excess ~ MKT + SMB + HML + RMW + CMA, data = .)) %>% 
   tidy(model)
 
 ff_dplyr_byhand
 ```
 
-```{r, warning=FALSE, message=FALSE}
-# Rolling regressions are easy to implement
-lm_roll <- rollify(~lm(.x ~ .y), window = 5, unlist = FALSE)
+We will display this table in the Shiny app and could probably stop here with a reasonably useful template, but let's also add some visualizations, starting with the rolling R-squared.
 
-gapminder %>%
-  dplyr::group_by(country) %>%
-  dplyr::mutate(rolling_lm = lm_roll(lifeExp, year))
+We will make use of the `rollify()` function from `tibbletime` to apply our model on a rolling basis. 
 
-rolling_lm <- rollify(~lm(.x ~ .y - .x - .z, data = .y), window = 7, unlist = FALSE)
-zoo(ff_portfolio_returns_joined)
-require(zoo)
-rollapply(zoo(ff_portfolio_returns_joined),
-          width=10,
-          FUN = function(Z) 
-          { 
-             coef(lm(Returns_excess ~ MKT + SMB, data = as.data.frame(Z), na.rm=T))
-          },
-          by.column=FALSE, align="right")
-```
+First, we choose a rolling window of 100 and then define our rolling function.
 
 ```{r}
+window <- 100
+
 rolling_lm <- rollify(.f = function(Returns_excess, MKT, SMB, HML, RMW, CMA) {
                               lm(Returns_excess ~ MKT + SMB + HML + RMW + CMA)
                            }, 
-                      window = 50, 
+                      window = window, 
                       unlist = FALSE)
+```
 
-rolling_ff_test <-
+Next we apply that function, which we called `rolling_lm()` to our data frame using `mutate()`.
+
+```{r}
+rolling_ff <- 
   ff_portfolio_returns_joined %>% 
   mutate(rolling_lm = rolling_lm(Returns_excess, MKT, SMB, HML, RMW, CMA)) %>% 
-  #filter(!is.na(roll_lm)) %>%
+  slice(-1:-window)
+
+tail(rolling_ff %>% select(date, rolling_lm))
+```
+
+
+Notice our object has the model results nested in the `rolling_lm` column. That is substantively fine, but not ideal for creating visualizations on the fly in Shiny. 
+
+First, let's extract the R-squared for this model and plot on a rolling basis.
+
+We will extract that statistic with `glance()` and apply that function to the list column with `map()`.
+
+```{r}
+rolling_ff_glance <-
+  rolling_ff %>% 
+  mutate(glanced = map(rolling_lm, glance)) %>% 
+  unnest(glanced) %>% 
+  select(date, r.squared)
+
+head(rolling_ff_glance)
+```
+
+
+Then we can visualize with `highcharter` via the `hc_add_series()` function. I prefer to pass an `xts` object to `highcharter` so first we will coerce back to `xts`.
+
+```{r}
+rolling_r_squared_xts <- 
+  rolling_ff_glance %>% 
+  tk_xts(date_var = date)
+
+
+highchart(type = "stock") %>% 
+  hc_title(text = "Rolling R Squared") %>%
+  hc_add_series(rolling_r_squared_xts, color = "cornflowerblue") %>%
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_navigator(enabled = FALSE) %>% 
+  hc_scrollbar(enabled = FALSE)
+```
+
+
+
+Now we can port that rolling visualization over to the Shiny app. 
+
+It might also be nice to chart the rolling beta for each factor. Let's invoke `tidy()` from the `broom` package, and then `unnest()`.
+
+```{r}
+
+rolling_ff_tidy <-
+  rolling_ff %>%
   mutate(tidied = map(rolling_lm, tidy)) %>% 
   unnest(tidied) %>% 
-  select(date, term, estimate, std.error, statistic, p.value) %>% 
-  na.omit()
+  select(date, term, estimate, std.error, statistic, p.value)
 
-rolling_ff_test
+head(rolling_ff_tidy)
 
 ```
 
+We now have the rolling beta estimates for each factor in the `estimate` column. Let's chart with `ggplot()`. We want each `term` to get its own color so we `group_by(term)`, then call `ggplot()` and `geom_line()`.
 
 ```{r}
-rolling_ff_test %>% 
-  group_by(term) %>% 
+rolling_ff_tidy %>% 
+  group_by(term) %>%
   ggplot(aes(x = date, y = estimate, color = term)) + 
-  geom_line() +
-  facet_wrap(~term)
+  geom_line()
 ```
 
 
+Once we carry this `ggplot` chunk over to the Shiny application, our work is done and we can look at the full live execution. 
 
-```{r}
-
-rolling_lm(ff_portfolio_returns_joined)
- mutate(ff_portfolio_returns_joined, roll_lm = rolling_lm(ff_portfolio_returns_joined))
- 
- FB_reg %>%
-  filter(!is.na(roll_lm)) %>%
-  mutate(tidied = purrr::map(roll_lm, broom::tidy)) %>%
-  unnest(tidied) %>%
-  select(symbol, date, term, estimate, std.error, statistic, p.value)
-
-
-
-ff_portfolio_returns_joined$Returns_excess
-
-ff_dplyr_byhand
-```
-
-
-
+We have grinded through a lot in this Notebook - data import, wrangling, tidying, regression, rolling regression, and visualization - and in so doing have constructed our Shiny app piece-by-piece.  Our goal was to build a useful tool for visualizing Fama French but also to create code flows that can serve as a template for future work with CSVs, stock prices and modeling. 
