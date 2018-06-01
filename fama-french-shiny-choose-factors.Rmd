@@ -1,11 +1,12 @@
 ---
-title: "Fama French Shiny Choose Factors"
+title: "Riingo Fama French Tibbletime Shiny"
 runtime: shiny
 output:
   flexdashboard::flex_dashboard:
     orientation: rows
     source_code: embed
 ---
+
 
 ```{r setup, message = FALSE}
 
@@ -17,15 +18,20 @@ library(tibbletime)
 library(highcharter)
 library(scales)
 library(readr)
+library(riingo)
 
 knitr::opts_chunk$set(message=FALSE, warning=FALSE)
 
 temp <- tempfile()
+
+# enter your tiingo api key
+riingo_set_token("97d26898fe27141ef524c1fa3ab0d3f0c3c59b09")
+
 ```
 
 
 Sidebar {.sidebar}
-=====================================
+====================================
   
 ```{r}
 
@@ -79,7 +85,7 @@ fluidRow(
 
 fluidRow(
   column(6,
-  dateInput("date", "Starting Date", min = "1990-01-01", "2013-01-01", format = "yyyy-mm-dd")),
+  dateInput("date", "Starting Date", min = "2000-01-01", "2018-01-01", format = "yyyy-mm-dd")),
   column(5,
   numericInput("window", "Window", 100, min = 50, max = 250, step = 20))
 )
@@ -89,34 +95,37 @@ actionButton("go", "Submit")
 
 ```{r}
 
-prices <- eventReactive(input$go, {
+prices_tiingo <- eventReactive(input$go, {
   
-  symbols <- c(input$stock1, input$stock2, input$stock3, input$stock4, input$stock5)
+symbols <- c(input$stock1, input$stock2, 
+             input$stock3, input$stock4, 
+             input$stock5)
+
+prices_tiingo <- 
+  riingo_prices(symbols, start_date = input$date) %>% 
+  select(ticker, date, adjClose)
+
+returns_tiingo <- 
+  prices_tiingo %>%
+  group_by(ticker) %>%  
+  mutate(returns = (log(adjClose) - log(lag(adjClose)))) 
   
-  getSymbols(symbols, src = 'yahoo', from = input$date, 
-             auto.assign = TRUE, warnings = FALSE) %>% 
-  map(~Ad(get(.))) %>% 
-  reduce(merge) %>%
-  `colnames<-`(symbols)
+w <- c(input$w1/100, input$w2/100, 
+       input$w3/100, input$w4/100, input$w5/100)
+  
+portfolio_tiingo <-  
+  returns_tiingo %>% 
+  mutate(weights = case_when(
+    ticker == symbols[1] ~ w[1],
+    ticker == symbols[2] ~ w[2],
+    ticker == symbols[3] ~ w[3],
+    ticker == symbols[4] ~ w[4],
+    ticker == symbols[5] ~ w[5]), 
+  weighted_returns = returns * weights) %>% 
+  group_by(date) %>% 
+  summarise(returns = sum(weighted_returns))
 })
 
-
-asset_returns_daily <- eventReactive(input$go, {
-  prices <- prices()
-  asset_returns <- na.omit(Return.calculate(prices, method = "log"))
-})
-  
-
-  portfolio_returns_daily <- eventReactive(input$go, {
-      asset_returns_daily <- asset_returns_daily()
-      
-    w <- c(input$w1/100, input$w2/100, input$w3/100, input$w4/100, input$w5/100)
-
-  portfolio_returns_xts_rebalanced_yearly <- 
-    Return.portfolio(asset_returns_daily, weights = w, rebalance_on = "years") %>%
-    `colnames<-`("returns")
-  })
-  
 
 ```
 
@@ -126,14 +135,18 @@ asset_returns_daily <- eventReactive(input$go, {
 
 ff_portfolio_returns_joined <- eventReactive(input$go, {
   
-portfolio_returns_daily <- portfolio_returns_daily()
+portfolio_returns_daily <- prices_tiingo()
 
-factors_address <- paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/", input$factor, "_CSV.zip", sep="" )
+factors_address <- 
+  paste("http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/", 
+        input$factor, 
+        "_CSV.zip", 
+        sep="" )
 
-factors_csv_name <- paste(input$factor, ".csv", sep="")
+download.file(factors_address, temp, quiet = TRUE)
 
-download.file(factors_address, temp)
-
+factors_csv_name <- 
+  paste(input$factor, ".csv", sep = "")
   
   FF_Factors <- 
   read_csv(unz(temp, factors_csv_name), skip = 6) %>% 
@@ -143,7 +156,7 @@ download.file(factors_address, temp)
   
   ff_portfolio_returns <-
   portfolio_returns_daily %>%
-  tk_tbl(preserve_index = TRUE, rename_index = 'date') %>%
+  mutate(date = ymd(date)) %>% 
   left_join(FF_Factors %>%  mutate_if(is.numeric, funs(. / 100))) %>% 
   mutate(Returns_excess = returns - RF) %>%
   select(-returns, -RF) %>% 
@@ -153,13 +166,14 @@ download.file(factors_address, temp)
 ff_dplyr_byhand <- eventReactive(input$go, {
   
   ff_portfolio_returns_joined() %>% 
-  do(model = lm(Returns_excess ~ . -date , data = .)) %>%
-  tidy(model)
+  do(model = lm(Returns_excess ~ . -date , data = .)) 
   
 })
 
+
 rolling_ff <- eventReactive(input$go, {
-  
+
+# Create our rolling linear model using rollify.    
 rolling_lm <- rollify(.f = function(Returns_excess, MKT, SMB, HML, RMW, CMA) {
                               lm(Returns_excess ~ MKT + SMB + HML + RMW + CMA)
                            }, 
@@ -175,7 +189,7 @@ rolling_ff <-
 ```
 
 ```{r}
-
+# Get rolling r squared as xts object
 rolling_r_squared_xts <- eventReactive(input$go, {
   rolling_ff() %>% 
   mutate(glanced = map(rolling_lm, glance)) %>% 
@@ -186,8 +200,8 @@ rolling_r_squared_xts <- eventReactive(input$go, {
 ```
 
 ```{r}
-
-rolling_ff_tidy <- eventReactive(input$go, {
+# Get rolling factor betas as tibble
+rolling_betas <- eventReactive(input$go, {
   
 rolling_ff() %>%
   mutate(tidied = map(rolling_lm, tidy)) %>% 
@@ -199,14 +213,13 @@ rolling_ff() %>%
 })  
 ```
 
-
-Fama French
-=====================================
+Fama French 
+====================================
 
 Row 1 {.tabset}
 ---------------------
 
-### Rolling R Squared
+### Rolling R Squared of 5-Factor Model
 
 ```{r}
 renderHighchart({
@@ -223,28 +236,32 @@ highchart(type = "stock") %>%
 Row 2 {.tabset}
 ------------------------------
 
-### Model Results
-
-```{r}
-renderTable({
-  ff_dplyr_byhand()
-}, digits = 4)
-```
-
-
-### Rolling Betas
+### Rolling Betas for Each Factor
 
 ```{r}
 renderPlot({
-  rolling_ff_tidy() %>%  
+  rolling_betas() %>%  
   ggplot(aes(x = date, y = estimate, color = term)) + 
   geom_line()
 })
 ```
 
+### Model Results
 
+```{r}
+renderTable({
+  ff_dplyr_byhand() %>% 
+    glance(model) %>% 
+    select(r.squared, adj.r.squared, sigma, statistic, p.value)
+}, digits = 4)
+```
 
+### Factor Coefficients
 
-
-
+```{r}
+renderTable({
+  ff_dplyr_byhand() %>% 
+    tidy(model, conf.int = T)
+}, digits = 4)
+```
 
